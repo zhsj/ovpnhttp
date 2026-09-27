@@ -5,8 +5,10 @@ import (
 	"encoding/hex"
 	"log"
 	"net"
+	"net/netip"
 	"os"
 	"os/signal"
+	"runtime"
 
 	"github.com/bclswl0827/govpn/protocols/openvpn"
 	"github.com/jessevdk/go-flags"
@@ -59,7 +61,13 @@ func main() {
 		Dial:   session.DialContext,
 		DNS:    opts.DNS,
 		Stats: func() (any, error) {
-			return nil, nil
+			return struct {
+				Addr         []netip.Prefix
+				NumGoroutine int
+			}{
+				Addr:         session.Addresses(),
+				NumGoroutine: runtime.NumGoroutine(),
+			}, nil
 		},
 	}
 	proxier.Serve(ctx, ln)
