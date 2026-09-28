@@ -3,12 +3,15 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"log"
 	"net"
 	"net/netip"
 	"os"
 	"os/signal"
 	"runtime"
+	"sync"
+	"time"
 
 	"github.com/bclswl0827/govpn/protocols/openvpn"
 	"github.com/jessevdk/go-flags"
@@ -41,31 +44,72 @@ func main() {
 
 	ctx, _ := signal.NotifyContext(context.Background(), os.Interrupt)
 
-	session, err := openvpn.NewClient(openvpn.Config{
-		Remote: opts.Server, Port: opts.Port, PeerFingerprints: [][]byte{peerFP},
-		Username: opts.Username, Password: opts.Passwd,
-		Logger: logger,
-	}).Start(ctx)
-	if err != nil {
-		logger.Fatal(err)
-	}
-	defer session.Close()
-
 	ln, err := net.Listen("tcp", opts.Listen)
 	if err != nil {
 		logger.Fatal(err)
 	}
 
+	var (
+		dialMu sync.RWMutex
+		dialFn = func(ctx context.Context, network, address string) (net.Conn, error) {
+			return nil, errors.New("vpn session not established")
+		}
+	)
+
+	go func() {
+		for {
+			session, err := openvpn.NewClient(openvpn.Config{
+				Remote: opts.Server, Port: opts.Port, PeerFingerprints: [][]byte{peerFP},
+				Username: opts.Username, Password: opts.Passwd,
+				Logger: logger,
+			}).Start(ctx)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				logger.Printf("Failed to start VPN session: %v, retrying in 5s...", err)
+				time.Sleep(5 * time.Second)
+				continue
+			}
+
+			logger.Printf("VPN session established")
+
+			dialMu.Lock()
+			dialFn = session.DialContext
+			dialMu.Unlock()
+
+			waitErr := session.Wait(ctx)
+			logger.Printf("VPN session ended: %v, reconnecting...", waitErr)
+
+			dialMu.Lock()
+			dialFn = func(ctx context.Context, network, address string) (net.Conn, error) {
+				return nil, errors.New("vpn session reconnecting")
+			}
+			dialMu.Unlock()
+
+			session.Close()
+
+			if ctx.Err() != nil {
+				return
+			}
+
+			time.Sleep(1 * time.Second)
+		}
+	}()
+
 	proxier := proxy.Proxy{
 		Logger: logger,
-		Dial:   session.DialContext,
-		DNS:    opts.DNS,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			dialMu.RLock()
+			defer dialMu.RUnlock()
+			return dialFn(ctx, network, address)
+		},
+		DNS: opts.DNS,
 		Stats: func() (any, error) {
 			return struct {
 				Addr         []netip.Prefix
 				NumGoroutine int
 			}{
-				Addr:         session.Addresses(),
 				NumGoroutine: runtime.NumGoroutine(),
 			}, nil
 		},
