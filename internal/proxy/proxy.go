@@ -3,9 +3,11 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/zhsj/ovpnhttp/internal/resolver"
 	"github.com/zhsj/ovpnhttp/internal/third_party/tailscale/httpproxy"
@@ -39,6 +41,8 @@ func statsHandler(next http.Handler, stats func() (any, error)) http.Handler {
 	})
 }
 
+const dnsTimeout = 3 * time.Second
+
 func dialWithDNS(dial dialer, dns string) dialer {
 	resolv := resolver.New(dns, dial)
 
@@ -51,9 +55,12 @@ func dialWithDNS(dial dialer, dns string) dialer {
 			return dial(ctx, network, address)
 		}
 
-		ips, err := resolv.LookupNetIP(ctx, network, host)
+		dnsCtx, dnsCancel := context.WithTimeout(ctx, dnsTimeout)
+		defer dnsCancel()
+
+		ips, err := resolv.LookupNetIP(dnsCtx, network, host)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("dns lookup %s: %w", host, err)
 		}
 
 		var (

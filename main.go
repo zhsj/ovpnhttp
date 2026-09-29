@@ -107,7 +107,6 @@ func main() {
 		DNS: opts.DNS,
 		Stats: func() (any, error) {
 			return struct {
-				Addr         []netip.Prefix
 				NumGoroutine int
 			}{
 				NumGoroutine: runtime.NumGoroutine(),

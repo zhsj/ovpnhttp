@@ -21,6 +21,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"slices"
 	"strconv"
 	"time"
 )
@@ -118,10 +119,10 @@ func (s *Server) logf(format string, args ...any) {
 }
 
 // Serve accepts and handles incoming connections on the given listener.
-func (s *Server) Serve(l net.Listener) error {
-	defer l.Close()
+func (s *Server) Serve(ln net.Listener) error {
+	defer ln.Close()
 	for {
-		c, err := l.Accept()
+		c, err := ln.Accept()
 		if err != nil {
 			return err
 		}
@@ -487,10 +488,8 @@ func parseClientGreeting(r io.Reader, authMethod byte) error {
 	if err != nil {
 		return fmt.Errorf("could not read methods")
 	}
-	for _, m := range methods {
-		if m == authMethod {
-			return nil
-		}
+	if slices.Contains(methods, authMethod) {
+		return nil
 	}
 	return fmt.Errorf("no acceptable auth methods")
 }
