@@ -13,10 +13,19 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bclswl0827/govpn"
 	"github.com/bclswl0827/govpn/protocols/openvpn"
 	"github.com/jessevdk/go-flags"
+	"golang.org/x/net/icmp"
+	"golang.org/x/net/ipv4"
 
 	"github.com/zhsj/ovpnhttp/internal/proxy"
+)
+
+const (
+	pingInterval    = 3 * time.Second
+	pingTimeout     = 2 * time.Second
+	pingMaxFailures = 5
 )
 
 func main() {
@@ -78,7 +87,12 @@ func main() {
 			dialFn = session.DialContext
 			dialMu.Unlock()
 
+			pingCtx, cancelPing := context.WithCancel(ctx)
+			go monitorGateway(pingCtx, session, logger)
+
 			waitErr := session.Wait(ctx)
+			cancelPing()
+
 			logger.Printf("VPN session ended: %v, reconnecting...", waitErr)
 
 			dialMu.Lock()
@@ -114,4 +128,74 @@ func main() {
 		},
 	}
 	proxier.Serve(ctx, ln)
+}
+
+func monitorGateway(ctx context.Context, session *govpn.Session, logger *log.Logger) {
+	var gateway string
+	for _, addr := range session.Addresses() {
+		if addr.Addr().Is4() {
+			ip := addr.Masked().Addr().As4()
+			ip[3]++
+			gateway = netip.AddrFrom4(ip).String()
+			break
+		}
+	}
+	if gateway == "" {
+		return
+	}
+
+	logger.Printf("ping: monitoring gateway %s", gateway)
+
+	var failures int
+	ticker := time.NewTicker(pingInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		if ping(ctx, session, gateway) {
+			failures = 0
+			continue
+		}
+		failures++
+		logger.Printf("ping: timeout to %s (%d/%d)", gateway, failures, pingMaxFailures)
+		if failures >= pingMaxFailures {
+			logger.Printf("ping: %d consecutive timeouts, closing session to reconnect", pingMaxFailures)
+			_ = session.Close()
+			return
+		}
+	}
+}
+
+func ping(ctx context.Context, session *govpn.Session, gateway string) bool {
+	conn, err := session.DialICMP4Context(ctx, gateway)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+
+	b, err := (&icmp.Message{
+		Type: ipv4.ICMPTypeEcho, Code: 0,
+		Body: &icmp.Echo{ID: os.Getpid() & 0xffff, Seq: 1, Data: []byte("ping")},
+	}).Marshal(nil)
+	if err != nil {
+		return false
+	}
+	if _, err := conn.Write(b); err != nil {
+		return false
+	}
+	conn.SetReadDeadline(time.Now().Add(pingTimeout))
+
+	buf := make([]byte, 1500)
+	n, err := conn.Read(buf)
+	if err != nil {
+		return false
+	}
+
+	rm, err := icmp.ParseMessage(1, buf[:n])
+	return err == nil && rm.Type == ipv4.ICMPTypeEchoReply
 }
