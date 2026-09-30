@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bclswl0827/govpn"
@@ -27,6 +28,8 @@ const (
 	pingTimeout     = 2 * time.Second
 	pingMaxFailures = 5
 )
+
+var pingFailures atomic.Int64
 
 func main() {
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
@@ -122,8 +125,10 @@ func main() {
 		Stats: func() (any, error) {
 			return struct {
 				NumGoroutine int
+				PingFailures int
 			}{
 				NumGoroutine: runtime.NumGoroutine(),
+				PingFailures: int(pingFailures.Load()),
 			}, nil
 		},
 	}
@@ -131,6 +136,8 @@ func main() {
 }
 
 func monitorGateway(ctx context.Context, session *govpn.Session, logger *log.Logger) {
+	pingFailures.Store(0)
+
 	var gateway string
 	for _, addr := range session.Addresses() {
 		if addr.Addr().Is4() {
@@ -146,7 +153,6 @@ func monitorGateway(ctx context.Context, session *govpn.Session, logger *log.Log
 
 	logger.Printf("ping: monitoring gateway %s", gateway)
 
-	var failures int
 	ticker := time.NewTicker(pingInterval)
 	defer ticker.Stop()
 
@@ -158,12 +164,12 @@ func monitorGateway(ctx context.Context, session *govpn.Session, logger *log.Log
 		}
 
 		if ping(ctx, session, gateway) {
-			failures = 0
+			pingFailures.Store(0)
 			continue
 		}
-		failures++
-		logger.Printf("ping: timeout to %s (%d/%d)", gateway, failures, pingMaxFailures)
-		if failures >= pingMaxFailures {
+		consecutive := int(pingFailures.Add(1))
+		logger.Printf("ping: timeout to %s (%d/%d)", gateway, consecutive, pingMaxFailures)
+		if consecutive >= pingMaxFailures {
 			logger.Printf("ping: %d consecutive timeouts, closing session to reconnect", pingMaxFailures)
 			_ = session.Close()
 			return
